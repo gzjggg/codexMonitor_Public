@@ -1,0 +1,391 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index 78a0823..e2935d8 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -3,6 +3,7 @@ use crate::common::ResponseStream;
+ use crate::common::ResponsesApiRequest;
+ use crate::endpoint::session::EndpointSession;
+ use crate::error::ApiError;
++use crate::model_probe::ModelProbe;
+ use crate::provider::Provider;
+ use crate::requests::Compression;
+ use crate::requests::headers::build_session_headers;
+@@ -112,6 +113,17 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             compression,
+             turn_state,
+         } = options;
++        let probe = ModelProbe::new(
++            &request.model,
++            thread_id.as_deref(),
++            request
++                .client_metadata
++                .as_ref()
++                .and_then(|metadata| metadata.get("turn_id"))
++                .map(String::as_str),
++            "responses_http",
++            /*warmup*/ false,
++        );
+         let body = EncodedJsonBody::encode(&request)
+             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+ 
+@@ -124,7 +136,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             insert_header(&mut headers, "x-openai-subagent", &subagent);
+         }
+ 
+-        self.stream_encoded(body, headers, compression, turn_state)
++        self.stream_encoded(body, headers, compression, turn_state, probe)
+             .await
+     }
+ 
+@@ -146,9 +158,23 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         compression: Compression,
+         turn_state: Option<Arc<OnceLock<String>>>,
+     ) -> Result<ResponseStream, ApiError> {
++        let probe = body.get("model").and_then(Value::as_str).and_then(|model| {
++            let client_metadata = body.get("client_metadata").and_then(Value::as_object);
++            ModelProbe::new(
++                model,
++                client_metadata
++                    .and_then(|metadata| metadata.get("thread_id"))
++                    .and_then(Value::as_str),
++                client_metadata
++                    .and_then(|metadata| metadata.get("turn_id"))
++                    .and_then(Value::as_str),
++                "responses_http",
++                body.get("generate").and_then(Value::as_bool) == Some(false),
++            )
++        });
+         let body = EncodedJsonBody::encode(&body)
+             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+-        self.stream_encoded(body, extra_headers, compression, turn_state)
++        self.stream_encoded(body, extra_headers, compression, turn_state, probe)
+             .await
+     }
+ 
+@@ -158,6 +184,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         extra_headers: HeaderMap,
+         compression: Compression,
+         turn_state: Option<Arc<OnceLock<String>>>,
++        probe: Option<ModelProbe>,
+     ) -> Result<ResponseStream, ApiError> {
+         let request_compression = match compression {
+             Compression::None => RequestCompression::None,
+@@ -186,6 +213,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             self.session.provider().stream_idle_timeout,
+             self.sse_telemetry.clone(),
+             turn_state,
++            probe,
+         ))
+     }
+ }
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 95d41e0..8f601e9 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -8,4 +8,5 @@ use crate::common::SafetyBufferingTreatment;
+ use crate::error::ApiError;
++use crate::model_probe::ModelProbe;
+ use crate::provider::Provider;
+ use crate::rate_limits::parse_rate_limit_event;
+ use crate::safety_buffering::treatment_from_headers;
+@@ -271,6 +272,13 @@ impl ResponsesWebsocketConnection {
+             connection_reused,
+         };
+         let request_text = serialize_websocket_request(&request)?;
++        let probe = ModelProbe::new(
++            &timing_log_context.model,
++            timing_log_context.thread_id.as_deref(),
++            timing_log_context.turn_id.as_deref(),
++            "websocket",
++            timing_log_context.warmup,
++        );
+ 
+         let current_span = Span::current();
+         tokio::spawn(
+@@ -279,7 +287,7 @@ impl ResponsesWebsocketConnection {
+                 reason = "the guard serializes exclusive use of the websocket stream for the lifetime of the response stream"
+             )]
+             async move {
+-                if let Some(model) = server_model {
++                if let Some(model) = server_model.clone() {
+                     let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
+                 }
+                 if server_reasoning_included {
+@@ -315,6 +323,8 @@ impl ResponsesWebsocketConnection {
+                             telemetry,
+                             turn_state.as_deref(),
+                             &timing_log_context,
++                            probe,
++                            server_model.as_deref(),
+                         ) => result,
+                         _ = tx_event.closed() => Err(ApiError::Stream(
+                             "response event consumer dropped".to_string(),
+@@ -690,6 +700,8 @@ async fn run_websocket_response_stream(
+     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
+     turn_state: Option<&OnceLock<String>>,
+     timing_log_context: &ResponsesWebsocketTimingLogContext,
++    mut probe: Option<ModelProbe>,
++    handshake_model: Option<&str>,
+ ) -> Result<(), ApiError> {
+     let mut last_server_model: Option<String> = None;
+     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
+@@ -701,6 +713,9 @@ async fn run_websocket_response_stream(
+         timing_log_context.connection_reused,
+     )
+     .await?;
++    if let Some(probe) = probe.as_ref() {
++        probe.sent(handshake_model);
++    }
+ 
+     loop {
+         let poll_start = Instant::now();
+@@ -746,6 +761,9 @@ async fn run_websocket_response_stream(
+                     text.as_str(),
+                     timing_log_context,
+                 );
++                if let Some(probe) = probe.as_mut() {
++                    probe.response(event.response.as_ref(), event.response_model().as_deref());
++                }
+                 if event.kind() == "codex.response.metadata"
+                     && let Some(etag) =
+                         event
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 7287cb2..01708be 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -5,6 +5,7 @@ pub(crate) mod endpoint;
+ pub(crate) mod error;
+ pub(crate) mod files;
+ pub(crate) mod images;
++pub(crate) mod model_probe;
+ pub(crate) mod provider;
+ pub(crate) mod rate_limits;
+ pub(crate) mod requests;
+diff --git a/codex-rs/codex-api/src/model_probe.rs b/codex-rs/codex-api/src/model_probe.rs
+new file mode 100644
+index 0000000..c688917
+--- /dev/null
++++ b/codex-rs/codex-api/src/model_probe.rs
+@@ -0,0 +1,91 @@
++//! Opt-in metadata-only model audit; never changes a request or response.
++
++use serde_json::Value;
++use serde_json::json;
++use std::fs::OpenOptions;
++use std::io::Write;
++use std::path::PathBuf;
++use std::time::SystemTime;
++use std::time::UNIX_EPOCH;
++use uuid::Uuid;
++
++pub struct ModelProbe {
++    path: PathBuf,
++    metadata: Value,
++    observed: (Option<String>, Option<String>),
++}
++
++impl ModelProbe {
++    pub(crate) fn new(
++        requested_model: &str,
++        thread_id: Option<&str>,
++        turn_id: Option<&str>,
++        transport: &str,
++        warmup: bool,
++    ) -> Option<Self> {
++        let path = std::env::var_os("CODEX_MODEL_PROBE_PATH")?;
++        if path.is_empty() {
++            return None;
++        }
++        Some(Self {
++            path: PathBuf::from(path),
++            metadata: json!({
++                "id": Uuid::new_v4().to_string(),
++                "requested_model": requested_model,
++                "thread_id": thread_id,
++                "turn_id": turn_id,
++                "transport": transport,
++                "warmup": warmup,
++            }),
++            observed: (None, None),
++        })
++    }
++
++    pub(crate) fn sent(&self, server_model: Option<&str>) {
++        self.record("request", /*response_model*/ None, server_model);
++    }
++
++    pub(crate) fn response(&mut self, response: Option<&Value>, server_model: Option<&str>) {
++        let response_model = response
++            .and_then(|value| value.get("model"))
++            .and_then(Value::as_str);
++        let observed = (
++            response_model.map(str::to_owned),
++            server_model.map(str::to_owned),
++        );
++        if observed != (None, None) && observed != self.observed {
++            self.record("response", response_model, server_model);
++            self.observed = observed;
++        }
++    }
++
++    fn record(&self, phase: &str, response_model: Option<&str>, server_model: Option<&str>) {
++        let mut event = self.metadata.clone();
++        event["phase"] = json!(phase);
++        event["time"] = json!(
++            SystemTime::now()
++                .duration_since(UNIX_EPOCH)
++                .unwrap_or_default()
++                .as_secs_f64()
++        );
++        event["response_model"] = json!(response_model);
++        event["server_model"] = json!(server_model);
++        let result = (|| -> std::io::Result<()> {
++            // ponytail: a short file lock per metadata line; use a writer queue if audit I/O becomes measurable.
++            let mut file = OpenOptions::new()
++                .create(true)
++                .read(true)
++                .append(true)
++                .open(&self.path)?;
++            file.lock()?;
++            writeln!(file, "{event}")
++        })();
++        if let Err(error) = result {
++            tracing::warn!(%error, "model probe could not append metadata");
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "model_probe_tests.rs"]
++mod tests;
+diff --git a/codex-rs/codex-api/src/model_probe_tests.rs b/codex-rs/codex-api/src/model_probe_tests.rs
+new file mode 100644
+index 0000000..41f43b8
+--- /dev/null
++++ b/codex-rs/codex-api/src/model_probe_tests.rs
+@@ -0,0 +1,29 @@
++use super::*;
++
++#[test]
++fn records_only_models_and_keeps_request_response_correlated() {
++    let path =
++        std::env::temp_dir().join(format!("codex-model-probe-test-{}.jsonl", Uuid::new_v4()));
++    let mut probe = ModelProbe {
++        path: path.clone(),
++        metadata: json!({"id": "attempt-1", "requested_model": "requested"}),
++        observed: (None, None),
++    };
++    probe.sent(Some("header-model"));
++    probe.response(
++        Some(&json!({"model": "declared", "output": "PRIVATE"})),
++        Some("header-model"),
++    );
++    probe.response(Some(&json!({"model": "declared"})), Some("header-model"));
++    let text = std::fs::read_to_string(&path).expect("probe log");
++    std::fs::remove_file(path).expect("remove test log");
++    let records: Vec<Value> = text
++        .lines()
++        .map(|line| serde_json::from_str(line).expect("JSON"))
++        .collect();
++    assert_eq!(records.len(), 2);
++    assert_eq!(records[0]["id"], records[1]["id"]);
++    assert_eq!(records[1]["response_model"], "declared");
++    assert_eq!(records[1]["server_model"], "header-model");
++    assert!(!text.contains("PRIVATE"));
++}
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index e4f5f04..5edccbc 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -3,6 +3,7 @@ use crate::common::ResponseStream;
+ use crate::common::SafetyBuffering;
+ use crate::common::SafetyBufferingTreatment;
+ use crate::error::ApiError;
++use crate::model_probe::ModelProbe;
+ use crate::rate_limits::parse_all_rate_limits;
+ use crate::safety_buffering::treatment_from_headers;
+ use crate::telemetry::SseTelemetry;
+@@ -38,6 +39,7 @@ pub fn spawn_response_stream(
+     idle_timeout: Duration,
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     turn_state: Option<Arc<OnceLock<String>>>,
++    probe: Option<ModelProbe>,
+ ) -> ResponseStream {
+     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
+     let models_etag = stream_response
+@@ -50,6 +52,9 @@ pub fn spawn_response_stream(
+         .get(OPENAI_MODEL_HEADER)
+         .and_then(|v| v.to_str().ok())
+         .map(ToString::to_string);
++    if let Some(probe) = probe.as_ref() {
++        probe.sent(server_model.as_deref());
++    }
+     let reasoning_included = stream_response
+         .headers
+         .get(X_REASONING_INCLUDED_HEADER)
+@@ -91,6 +96,7 @@ pub fn spawn_response_stream(
+             idle_timeout,
+             telemetry,
+             safety_buffering_treatment,
++            probe,
+         )
+         .await;
+     });
+@@ -171,7 +177,7 @@ pub struct ResponsesStreamEvent {
+     pub(crate) kind: String,
+     pub(crate) headers: Option<Value>,
+     metadata: Option<Value>,
+-    response: Option<Value>,
++    pub(crate) response: Option<Value>,
+     item: Option<Value>,
+     item_id: Option<String>,
+     call_id: Option<String>,
+@@ -561,6 +567,7 @@ pub async fn process_sse(
+         idle_timeout,
+         telemetry,
+         SafetyBufferingTreatment::default(),
++        /*probe*/ None,
+     )
+     .await;
+ }
+@@ -571,6 +578,7 @@ async fn process_sse_with_treatment(
+     idle_timeout: Duration,
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     safety_buffering_treatment: SafetyBufferingTreatment,
++    mut probe: Option<ModelProbe>,
+ ) {
+     let mut stream = stream.eventsource();
+     let mut response_error: Option<ApiError> = None;
+@@ -623,11 +631,15 @@ async fn process_sse_with_treatment(
+                 continue;
+             }
+         };
++        let response_model = event.response_model();
++        if let Some(probe) = probe.as_mut() {
++            probe.response(event.response.as_ref(), response_model.as_deref());
++        }
+         let model_verifications = event.model_verifications();
+         let turn_moderation_metadata = event.turn_moderation_metadata();
+         let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
+ 
+-        if let Some(model) = event.response_model()
++        if let Some(model) = response_model
+             && last_server_model.as_deref() != Some(model.as_str())
+         {
+             if tx_event
+@@ -1512,6 +1524,7 @@ mod tests {
+             idle_timeout(),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*probe*/ None,
+         );
+         assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
+         let event = stream
+@@ -1552,6 +1565,7 @@ mod tests {
+             idle_timeout(),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*probe*/ None,
+         );
+         let mut events = Vec::new();
+         while let Some(event) = stream.rx_event.recv().await {

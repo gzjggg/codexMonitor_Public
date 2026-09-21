@@ -1,0 +1,14 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Local Codex checkout and build output
+/upstream/
+/output/
+
+# Monitor data (JSONL, SQLite archives and indexes) and runtime logs
+/logs/
+*.log
+
+# Browser verification artifacts
+/.playwright-cli/

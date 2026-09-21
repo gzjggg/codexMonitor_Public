@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <link rel="icon" href="data:," />
+    <title>Codex 模型监视器</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">CODEX MODEL MONITOR</p>
+          <h1 data-i18n="heading">模型调用监视器</h1>
+          <p class="intro" data-i18n="intro">对比每次调用所请求的模型与服务端声明的模型。</p>
+        </div>
+        <div class="masthead-actions">
+          <button class="language-toggle" id="languageToggle" type="button">English</button>
+          <div class="live" id="liveState" role="status" aria-live="polite">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span id="liveText">正在连接</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="notice" aria-label="判读说明" data-i18n-aria-label="noticeLabel">
+        <span class="notice-mark" aria-hidden="true">i</span>
+        <p data-i18n-html="notice">
+          名称不同只表示请求值与服务端声明值不一致，并不能单独证明模型被降级。
+          服务端声明来自响应体 <code>response.model</code> 或响应头 <code>openai-model</code>。
+          请求模型是客户端实际发送的值；后台标题 / 摘要调用与主任务独立，用途无法确认时标为未知。
+        </p>
+      </section>
+
+      <section class="summary" aria-label="事件概览" data-i18n-aria-label="summaryLabel">
+        <article class="metric metric-total">
+          <span data-i18n="total">全部记录</span>
+          <strong id="totalCount">—</strong>
+        </article>
+        <article class="metric metric-match">
+          <span data-i18n="equal">一致</span>
+          <strong id="matchCount">—</strong>
+        </article>
+        <article class="metric metric-mismatch">
+          <span data-i18n="different">不一致</span>
+          <strong id="mismatchCount">—</strong>
+        </article>
+        <article class="metric metric-unknown">
+          <span data-i18n="unknown">未知</span>
+          <strong id="unknownCount">—</strong>
+        </article>
+      </section>
+
+      <section class="panel health-panel" aria-labelledby="healthTitle">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">COLLECTOR</p>
+            <h2 id="healthTitle" data-i18n="healthTitle">采集状态</h2>
+          </div>
+          <span class="health-badge" id="healthStatus" data-i18n="waitingData">等待数据</span>
+        </div>
+        <dl class="health-grid">
+          <div><dt data-i18n="source">来源</dt><dd id="healthSource">—</dd></div>
+          <div><dt data-i18n="lastScan">最后扫描</dt><dd id="healthScan">—</dd></div>
+          <div><dt data-i18n="probe">探针</dt><dd id="healthProbe">—</dd></div>
+          <div class="health-error"><dt data-i18n="error">错误</dt><dd id="healthError">无</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel events-panel" aria-labelledby="eventsTitle">
+        <div class="events-heading">
+          <div>
+            <p class="section-kicker">LATEST FIRST</p>
+            <h2 id="eventsTitle" data-i18n="eventsTitle">调用记录</h2>
+          </div>
+          <div class="filters" role="search">
+            <label>
+              <span class="sr-only" data-i18n="filterPurpose">按调用用途筛选</span>
+              <select id="purposeFilter">
+                <option value="all" data-i18n="allPurposes">全部用途</option>
+                <option value="main" data-i18n="purposeMain">主任务</option>
+                <option value="fork" data-i18n="purposeFork">分支对话</option>
+                <option value="title_summary" data-i18n="purposeTitleSummary">后台：标题 / 摘要</option>
+                <option value="memory" data-i18n="purposeMemory">系统：记忆整理</option>
+                <option value="suggestions" data-i18n="purposeSuggestions">系统：任务建议</option>
+                <option value="suggestion_review" data-i18n="purposeSuggestionReview">系统：任务建议安全审核</option>
+                <option value="subagent" data-i18n="purposeSubagent">子代理</option>
+                <option value="background" data-i18n="purposeBackground">后台辅助</option>
+                <option value="warmup" data-i18n="purposeWarmup">预热</option>
+                <option value="unknown" data-i18n="purposeUnknown">用途未知</option>
+              </select>
+            </label>
+            <label class="search-field">
+              <span class="sr-only" data-i18n="filterRecords">筛选记录</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21 21-4.3-4.3m2.3-5.2a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z" /></svg>
+              <input id="textFilter" type="search" placeholder="筛选模型、线程、传输方式…" data-i18n-placeholder="searchPlaceholder" autocomplete="off" />
+            </label>
+            <label>
+              <span class="sr-only" data-i18n="filterStatus">按状态筛选</span>
+              <select id="statusFilter">
+                <option value="all" data-i18n="allStatuses">全部状态</option>
+                <option value="equal" data-i18n="equal">一致</option>
+                <option value="different" data-i18n="different">不一致</option>
+                <option value="unknown" data-i18n="unknown">未知</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="time">时间</th>
+                <th scope="col" data-i18n="purpose">调用用途</th>
+                <th scope="col" data-i18n="requestedModel">请求模型</th>
+                <th scope="col" data-i18n="serverModel">服务端声明</th>
+                <th scope="col" data-i18n="status">状态</th>
+                <th scope="col" data-i18n="source">来源</th>
+                <th scope="col" data-i18n="threadTurn">线程 / 回合</th>
+                <th scope="col" data-i18n="transport">传输</th>
+              </tr>
+            </thead>
+            <tbody id="eventRows"></tbody>
+          </table>
+          <div class="state-message" id="emptyState" hidden>
+            <strong id="emptyTitle" data-i18n="emptyTitle">暂无调用记录</strong>
+            <span id="emptyDetail" data-i18n="emptyDetail">捕获到模型调用后会显示在这里。</span>
+          </div>
+        </div>
+        <p class="updated" id="updatedAt" data-i18n="notUpdated">尚未更新</p>
+      </section>
+    </main>
+  </body>
+</html>
