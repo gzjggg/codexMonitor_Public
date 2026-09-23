@@ -58,10 +58,20 @@ function Remove-OldGeneratedFiles([string]$Repository, [string]$SourceRoot, [str
         }
     }
     if (Test-Path -LiteralPath $SourceRoot) {
+        $worktreeList = & git -c core.quotepath=false -C $Repository worktree list --porcelain
+        if ($LASTEXITCODE -ne 0) { throw 'Could not list generated source worktrees.' }
+        $registeredPaths = @($worktreeList | Where-Object { $_.StartsWith('worktree ') } | ForEach-Object {
+            [IO.Path]::GetFullPath($_.Substring(9)).Replace('/', '\')
+        })
         foreach ($directory in Get-ChildItem -LiteralPath $SourceRoot -Directory) {
             if (-not (Test-PathInside $directory.FullName $SourceRoot)) { throw 'Invalid generated source path.' }
-            & git -C $Repository worktree remove --force --force $directory.FullName | Out-Host
-            if ($LASTEXITCODE -ne 0) { throw "Could not remove generated source worktree $($directory.FullName)." }
+            if ($registeredPaths -contains $directory.FullName) {
+                & git -C $Repository worktree remove --force --force $directory.FullName | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "Could not remove generated source worktree $($directory.FullName)." }
+            }
+            else {
+                Remove-GeneratedDirectory $directory.FullName $SourceRoot
+            }
         }
         & git -C $Repository worktree prune
         if ($LASTEXITCODE -ne 0) { throw 'Could not prune generated source worktrees.' }

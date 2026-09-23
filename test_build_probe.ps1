@@ -32,6 +32,24 @@ try {
 }
 finally { Remove-GeneratedDirectory $cacheTestRoot ([IO.Path]::GetTempPath()) }
 
+$sourceTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-source-check-" + [guid]::NewGuid())
+try {
+    $repo = Join-Path $sourceTestRoot 'upstream'
+    $sources = Join-Path $sourceTestRoot 'output\src'
+    & git init --quiet $repo
+    & git -C $repo -c user.name=Test -c user.email=test@example.invalid commit --quiet --allow-empty -m test
+    $registered = Join-Path $sources 'registered'
+    & git -C $repo worktree add --quiet --detach $registered HEAD
+    $orphan = Join-Path $sources 'orphan'
+    New-Item -ItemType Directory -Path $orphan -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $orphan 'leftover.txt') -Value 'build residue'
+    Remove-OldGeneratedFiles $repo $sources (Join-Path $sourceTestRoot 'desktop') ''
+    if ((Test-Path $registered) -or (Test-Path $orphan) -or -not (Test-Path (Join-Path $repo '.git'))) {
+        throw 'Source cleanup must remove registered worktrees and orphan directories, preserving the repository.'
+    }
+}
+finally { Remove-GeneratedDirectory $sourceTestRoot ([IO.Path]::GetTempPath()) }
+
 $missingPackageFailed = & {
     function Get-AppxPackage { $null }
     try {
