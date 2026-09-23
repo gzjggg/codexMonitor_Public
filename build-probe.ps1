@@ -66,7 +66,7 @@ function Remove-OldGeneratedFiles([string]$Repository, [string]$SourceRoot, [str
         foreach ($directory in Get-ChildItem -LiteralPath $SourceRoot -Directory) {
             if (-not (Test-PathInside $directory.FullName $SourceRoot)) { throw 'Invalid generated source path.' }
             if ($registeredPaths -contains $directory.FullName) {
-                & git -C $Repository worktree remove --force --force $directory.FullName | Out-Host
+                & git -c core.longpaths=true -C $Repository worktree remove --force --force $directory.FullName | Out-Host
                 if ($LASTEXITCODE -ne 0) { throw "Could not remove generated source worktree $($directory.FullName)." }
             }
             else {

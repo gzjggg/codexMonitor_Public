@@ -37,9 +37,14 @@ try {
     $repo = Join-Path $sourceTestRoot 'upstream'
     $sources = Join-Path $sourceTestRoot 'output\src'
     & git init --quiet $repo
+    & git -C $repo config core.longpaths false
     & git -C $repo -c user.name=Test -c user.email=test@example.invalid commit --quiet --allow-empty -m test
     $registered = Join-Path $sources 'registered'
     & git -C $repo worktree add --quiet --detach $registered HEAD
+    $longDirectory = Join-Path $registered ('nested-' + ('x' * 130))
+    New-Item -ItemType Directory -Path $longDirectory -Force | Out-Null
+    $longFile = Join-Path $longDirectory (('y' * 80) + '.txt')
+    Set-Content -LiteralPath $longFile -Value 'long-path build residue'
     $orphan = Join-Path $sources 'orphan'
     New-Item -ItemType Directory -Path $orphan -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $orphan 'leftover.txt') -Value 'build residue'
