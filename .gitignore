@@ -5,6 +5,7 @@ __pycache__/
 # Local Codex checkout and build output
 /upstream/
 /output/
+/.monitor-settings.json
 
 # Monitor data (JSONL, SQLite archives and indexes) and runtime logs
 /logs/

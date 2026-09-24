@@ -25,6 +25,13 @@ try {
     $repoRoot = Join-Path $cacheTestRoot 'upstream'
     $targets = @((Join-Path $outputRoot 'target'), (Join-Path $repoRoot 'codex-rs\target'))
     New-Item -ItemType Directory -Force -Path $targets | Out-Null
+    $settingsFile = Join-Path $cacheTestRoot '.monitor-settings.json'
+    '{"keepBuildCache":true}' | Set-Content -LiteralPath $settingsFile
+    Remove-CompilationCache $repoRoot $outputRoot
+    if (@($targets | Where-Object { Test-Path -LiteralPath $_ }).Count -ne 2) {
+        throw 'Keep preference did not preserve compilation caches.'
+    }
+    '{"keepBuildCache":false}' | Set-Content -LiteralPath $settingsFile
     Remove-OldGeneratedFiles $repoRoot (Join-Path $outputRoot 'src') (Join-Path $outputRoot 'desktop') ''
     if (@($targets | Where-Object { Test-Path -LiteralPath $_ }).Count -ne 0 -or -not (Test-Path -LiteralPath $keep)) {
         throw 'Compilation cleanup must remove both target directories and preserve the runnable cache.'

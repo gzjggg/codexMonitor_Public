@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Inspect)
+param([switch]$Inspect, [switch]$Cache)
 
 $ErrorActionPreference = 'Stop'
 
@@ -47,9 +47,13 @@ function Remove-OldProbeCaches([string]$ProbeRoot, [string]$Keep) {
     foreach ($directory in $remove) { Remove-GeneratedDirectory $directory $ProbeRoot }
 }
 
-function Remove-OldGeneratedFiles([string]$Repository, [string]$SourceRoot, [string]$DesktopRoot, [string]$CurrentDesktop) {
-    $outputRoot = Split-Path $SourceRoot -Parent
-    $compileDirectories = @((Join-Path $outputRoot 'target'), (Join-Path $Repository 'codex-rs\target'))
+function Remove-CompilationCache([string]$Repository, [string]$OutputRoot, [switch]$Force) {
+    $settingsFile = Join-Path (Split-Path $OutputRoot -Parent) '.monitor-settings.json'
+    if (-not $Force -and (Test-Path -LiteralPath $settingsFile)) {
+        $settings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+        if ($settings.keepBuildCache -eq $true) { return }
+    }
+    $compileDirectories = @((Join-Path $OutputRoot 'target'), (Join-Path $Repository 'codex-rs\target'))
     Assert-NotRunning $compileDirectories
     foreach ($directory in $compileDirectories) {
         if (Test-Path -LiteralPath $directory) {
@@ -57,6 +61,10 @@ function Remove-OldGeneratedFiles([string]$Repository, [string]$SourceRoot, [str
             Remove-GeneratedDirectory $directory (Split-Path $directory -Parent)
         }
     }
+}
+
+function Remove-OldGeneratedFiles([string]$Repository, [string]$SourceRoot, [string]$DesktopRoot, [string]$CurrentDesktop) {
+    Remove-CompilationCache $Repository (Split-Path $SourceRoot -Parent)
     if (Test-Path -LiteralPath $SourceRoot) {
         $worktreeList = & git -c core.quotepath=false -C $Repository worktree list --porcelain
         if ($LASTEXITCODE -ne 0) { throw 'Could not list generated source worktrees.' }
@@ -83,6 +91,31 @@ function Remove-OldGeneratedFiles([string]$Repository, [string]$SourceRoot, [str
             }
         }
     }
+}
+
+if ($Cache) {
+    $settingsFile = Join-Path $PSScriptRoot '.monitor-settings.json'
+    $keep = $false
+    if (Test-Path -LiteralPath $settingsFile) {
+        $keep = (Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json).keepBuildCache -eq $true
+    }
+    $choice = $Host.UI.PromptForChoice('Build cache / 构建缓存',
+        'Keep compilation caches for faster rebuilds, or remove them after successful builds? / 是否保留编译缓存？',
+        @('&Keep / 保留', '&Remove / 不保留', '&Cancel / 取消'), $(if ($keep) { 0 } else { 1 }))
+    if ($choice -eq 2) { return }
+    @{ keepBuildCache = ($choice -eq 0) } | ConvertTo-Json | Set-Content -LiteralPath $settingsFile -Encoding utf8
+    Write-Host "Build cache preference saved: keep=$($choice -eq 0)"
+    if ($choice -eq 1) {
+        $delete = $Host.UI.PromptForChoice('Clean now? / 立即清理？',
+            'Only compilation caches are removed; runnable backends and logs are kept. Stop any build first. / 仅删除编译缓存，保留后端和日志；请先停止构建。',
+            @('&Now / 立即删除', '&Later / 稍后自动清理'), 1)
+        if ($delete -eq 0) {
+            if (Get-Process -Name cargo,rustc -ErrorAction SilentlyContinue) { throw 'A Rust build is running. Stop it before cleaning caches.' }
+            Remove-CompilationCache (Join-Path $PSScriptRoot 'upstream') (Join-Path $PSScriptRoot 'output') -Force
+            Write-Host 'Compilation caches cleared / 编译缓存已清理。'
+        }
+    }
+    return
 }
 
 $package = Get-AppxPackage -Name 'OpenAI.Codex'

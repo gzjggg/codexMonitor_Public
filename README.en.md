@@ -44,6 +44,10 @@ Press `Ctrl+C` to stop the web server; Codex runs independently. To return to th
 
 ## Important notes
 
+Run `codex-monitor -Cache` to open the terminal cache settings. Enter `K` to keep compilation caches for faster updates, `R` to remove them (the default), or `C` to cancel. After choosing removal, enter `N` to delete existing compilation caches now or `L` to defer cleanup until the next successful build or backend reuse. Runnable backends, the source repository, and call logs are preserved. Stop any build before immediate cleanup.
+
+The preference is saved in `.monitor-settings.json` in the project root and ignored by Git. Choosing Keep disables the automatic compilation-cache cleanup described below. Use `-Cache` separately; it does not launch Codex or the webpage.
+
 - The monitor compares the requested model name with the server's `response.model`, falling back to the `openai-model` response header. This is not proof of the model weights actually used by the server. Different names alone do not prove a downgrade. If either model is missing, the status is unknown.
 - Call purposes are classified using local task and turn metadata. Categories include main tasks, forked conversations, subagents, and background helpers. Calls remain unknown when there is insufficient evidence. Changes to official log formats may affect classification.
 - Logs stay in this directory under `logs/`. Daily SQLite archives contain only the requested model, response model, timestamp, consistency status, and purpose. Raw probe records also contain task, turn, and call identifiers for correlation. They do not record prompts, response text, or authentication tokens. Reading official metadata does not modify `.codex`.

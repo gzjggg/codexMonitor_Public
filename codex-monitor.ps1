@@ -2,11 +2,17 @@
 [CmdletBinding()]
 param(
     [switch]$Desktop,
+    [switch]$Cache,
     [switch]$NoBrowser,
     [ValidateRange(1, 65535)][int]$Port = 8765
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Cache) {
+    if ($Desktop) { throw 'Use -Cache separately from -Desktop.' }
+    & (Join-Path $PSScriptRoot 'build-probe.ps1') -Cache
+    return
+}
 $logDirectory = Join-Path $PSScriptRoot 'logs'
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $probeFile = Join-Path $logDirectory 'model-probe.jsonl'
