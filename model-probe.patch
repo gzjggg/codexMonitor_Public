@@ -79,18 +79,18 @@ index 9c41a802..52d96baf 100644
      }
  }
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 7f3ebd7a..3648ed11 100644
+index 27361aef..1265fa16 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-@@ -5,6 +5,7 @@ use crate::common::ResponsesWsRequest;
- use crate::common::SafetyBufferingTreatment;
- use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
+@@ -10,6 +10,7 @@ use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbe;
+ use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeError;
+ use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeFailureStage;
  use crate::error::ApiError;
 +use crate::model_probe::ModelProbe;
  use crate::provider::Provider;
  use crate::rate_limits::parse_rate_limit_event;
  use crate::responses_headers::json_headers_to_http_headers;
-@@ -276,6 +277,13 @@ impl ResponsesWebsocketConnection {
+@@ -284,6 +285,13 @@ impl ResponsesWebsocketConnection {
              connection_reused,
          };
          let request_text = serialize_websocket_request(&request)?;
@@ -104,7 +104,7 @@ index 7f3ebd7a..3648ed11 100644
  
          let current_span = Span::current();
          tokio::spawn(
-@@ -284,7 +292,7 @@ impl ResponsesWebsocketConnection {
+@@ -292,7 +300,7 @@ impl ResponsesWebsocketConnection {
                  reason = "the guard serializes exclusive use of the websocket stream for the lifetime of the response stream"
              )]
              async move {
@@ -113,35 +113,35 @@ index 7f3ebd7a..3648ed11 100644
                      let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
                  }
                  if server_reasoning_included {
-@@ -321,6 +329,8 @@ impl ResponsesWebsocketConnection {
-                             turn_state.as_deref(),
+@@ -354,6 +362,8 @@ impl ResponsesWebsocketConnection {
                              &timing_log_context,
-                             rx_interrupt,
+                             interrupt.clone(),
+                             &mut completion,
 +                            probe,
 +                            server_model.as_deref(),
                          ) => result,
-                         _ = tx_event.closed() => Err(ApiError::Stream(
-                             "response event consumer dropped".to_string(),
-@@ -670,6 +680,8 @@ async fn run_websocket_response_stream(
-     turn_state: Option<&OnceLock<String>>,
+                         () = &mut interrupt_timeout => Err(ApiError::Stream(
+                             "timed out draining interrupted response".into(),
+@@ -755,6 +765,8 @@ async fn run_websocket_response_stream(
      timing_log_context: &ResponsesWebsocketTimingLogContext,
-     interrupt: oneshot::Receiver<()>,
+     interrupt: impl Future<Output = ResponseInterrupt> + Clone + Unpin,
+     completion: &mut Option<ResponseEvent>,
 +    mut probe: Option<ModelProbe>,
 +    handshake_model: Option<&str>,
  ) -> Result<(), ApiError> {
      let mut last_server_model: Option<String> = None;
      let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
-@@ -683,6 +695,9 @@ async fn run_websocket_response_stream(
+@@ -774,6 +786,9 @@ async fn run_websocket_response_stream(
+     )
      .await?;
  
-     // A response owns its interrupt, and create must be sent before interrupt.
 +    if let Some(probe) = probe.as_ref() {
 +        probe.sent(handshake_model);
 +    }
-     let mut interrupt = interrupt.fuse();
-     let mut response_id = None;
-     loop {
-@@ -746,6 +761,9 @@ async fn run_websocket_response_stream(
+     // A response owns its interrupt, and create must be sent before interrupt.
+     let mut interrupt_request = interrupt.clone().fuse();
+     let mut interruption = None;
+@@ -870,6 +885,9 @@ async fn run_websocket_response_stream(
                      text.as_str(),
                      timing_log_context,
                  );
@@ -152,7 +152,7 @@ index 7f3ebd7a..3648ed11 100644
                      && let Some(etag) =
                          event
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index b7511d9e..30092400 100644
+index ad1a361a..11ce7153 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
 @@ -5,6 +5,7 @@ pub(crate) mod endpoint;
@@ -296,18 +296,18 @@ index 00000000..41f43b84
 +    assert!(!text.contains("PRIVATE"));
 +}
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
-index c01b13f1..7171bef5 100644
+index 7f076a13..4ecb59d2 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
 @@ -5,6 +5,7 @@ use crate::common::SafetyBuffering;
  use crate::common::SafetyBufferingTreatment;
  use crate::error::ApiError;
- use crate::error::parse_flex_unavailable;
+ use crate::error::parse_terminal_provider_error;
 +use crate::model_probe::ModelProbe;
  use crate::rate_limits::parse_all_rate_limits;
  use crate::safety_buffering::treatment_from_headers;
  use crate::telemetry::SseTelemetry;
-@@ -39,6 +40,7 @@ pub fn spawn_response_stream(
+@@ -40,6 +41,7 @@ pub fn spawn_response_stream(
      idle_timeout: Duration,
      telemetry: Option<Arc<dyn SseTelemetry>>,
      turn_state: Option<Arc<OnceLock<String>>>,
@@ -315,7 +315,7 @@ index c01b13f1..7171bef5 100644
  ) -> ResponseStream {
      let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
      let models_etag = stream_response
-@@ -51,6 +53,9 @@ pub fn spawn_response_stream(
+@@ -52,6 +54,9 @@ pub fn spawn_response_stream(
          .get(OPENAI_MODEL_HEADER)
          .and_then(|v| v.to_str().ok())
          .map(ToString::to_string);
@@ -325,7 +325,7 @@ index c01b13f1..7171bef5 100644
      let reasoning_included = stream_response
          .headers
          .get(X_REASONING_INCLUDED_HEADER)
-@@ -92,6 +97,7 @@ pub fn spawn_response_stream(
+@@ -93,6 +98,7 @@ pub fn spawn_response_stream(
              idle_timeout,
              telemetry,
              safety_buffering_treatment,
@@ -333,7 +333,7 @@ index c01b13f1..7171bef5 100644
          )
          .await;
      });
-@@ -161,7 +167,7 @@ pub struct ResponsesStreamEvent {
+@@ -162,7 +168,7 @@ pub struct ResponsesStreamEvent {
      pub(crate) kind: String,
      pub(crate) headers: Option<Value>,
      metadata: Option<Value>,
@@ -342,7 +342,7 @@ index c01b13f1..7171bef5 100644
      error: Option<Value>,
      item: Option<Value>,
      item_id: Option<String>,
-@@ -514,6 +520,7 @@ pub async fn process_sse(
+@@ -536,6 +542,7 @@ pub async fn process_sse(
          idle_timeout,
          telemetry,
          SafetyBufferingTreatment::default(),
@@ -350,7 +350,7 @@ index c01b13f1..7171bef5 100644
      )
      .await;
  }
-@@ -524,6 +531,7 @@ async fn process_sse_with_treatment(
+@@ -546,6 +553,7 @@ async fn process_sse_with_treatment(
      idle_timeout: Duration,
      telemetry: Option<Arc<dyn SseTelemetry>>,
      safety_buffering_treatment: SafetyBufferingTreatment,
@@ -358,7 +358,7 @@ index c01b13f1..7171bef5 100644
  ) {
      let mut stream = stream.eventsource();
      let mut response_error: Option<ApiError> = None;
-@@ -582,11 +590,15 @@ async fn process_sse_with_treatment(
+@@ -604,11 +612,15 @@ async fn process_sse_with_treatment(
                  continue;
              }
          };
@@ -375,7 +375,7 @@ index c01b13f1..7171bef5 100644
              && last_server_model.as_deref() != Some(model.as_str())
          {
              if tx_event
-@@ -1477,6 +1489,7 @@ mod tests {
+@@ -1549,6 +1561,7 @@ mod tests {
              idle_timeout(),
              /*telemetry*/ None,
              /*turn_state*/ None,
@@ -383,7 +383,7 @@ index c01b13f1..7171bef5 100644
          );
          assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
          let event = stream
-@@ -1517,6 +1530,7 @@ mod tests {
+@@ -1589,6 +1602,7 @@ mod tests {
              idle_timeout(),
              /*telemetry*/ None,
              /*turn_state*/ None,
@@ -391,3 +391,15 @@ index c01b13f1..7171bef5 100644
          );
          let mut events = Vec::new();
          while let Some(event) = stream.rx_event.recv().await {
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index 43f6aed8..da89f1b7 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -94,6 +94,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+             Duration::from_secs(60),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*probe*/ None,
+         );
+         let error = loop {
+             match stream.next().await {
