@@ -157,6 +157,21 @@ class ProbeStoreTest(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT purpose FROM events ORDER BY rowid").fetchall(),
                                  [("fork",), ("title_summary",)])
 
+    def test_ephemeral_memory_worker_requires_internal_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            store = ProbeStore(root / "probe.jsonl", metadata_dir=root)
+            event = {"thread_id": "worker", "turn_id": "turn"}
+            with closing(sqlite3.connect(root / "logs_2.sqlite")) as db:
+                db.execute("CREATE TABLE logs (thread_id TEXT, target TEXT, feedback_log_body TEXT)")
+                db.execute("INSERT INTO logs VALUES (?, ?, ?)", ("worker", "feedback_tags",
+                           f'turn.id="turn" cwd={root / "memories"}}}'))
+                db.commit()
+                self.assertEqual(store._purpose(event), "unknown")
+                db.execute("INSERT INTO logs VALUES ('worker', 'codex_core::shell_snapshot', 'thread_spawn{...}')")
+                db.commit()
+                self.assertEqual(store._purpose(event), "memory")
+
     def test_archive_write_failure_is_reported_and_retried(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             probe = Path(directory) / "probe.jsonl"

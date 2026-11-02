@@ -165,6 +165,7 @@ class ProbeStore:
         if key in self._purposes:
             return self._purposes[key]
         purpose = "unknown"
+        row = None
         try:
             state = self.metadata_dir / "state_5.sqlite"
             if state.exists():
@@ -172,7 +173,9 @@ class ProbeStore:
                     row = database.execute("SELECT source, thread_source FROM threads WHERE id = ?", (thread_id,)).fetchone()
                 if row:
                     source, thread_source = row
-                    if thread_source == "subagent" or '"thread_spawn"' in source:
+                    if thread_source == "memory_consolidation":
+                        purpose = "memory"
+                    elif thread_source == "subagent" or '"thread_spawn"' in source:
                         purpose = "subagent"
                     elif '"subagent"' in source:
                         purpose = "background"
@@ -206,6 +209,17 @@ class ProbeStore:
                         ).fetchone()
                         if fork:
                             purpose = "fork"
+                    if not row and purpose == "unknown" and not (found and found[0]):
+                        # Ephemeral consolidation workers have no persisted thread row.
+                        memory = database.execute(
+                            "SELECT 1 FROM logs WHERE thread_id = ? AND target = 'feedback_tags' "
+                            "AND instr(feedback_log_body, ?) > 0 AND instr(feedback_log_body, ?) > 0 "
+                            "AND EXISTS (SELECT 1 FROM logs WHERE thread_id = ? "
+                            "AND target = 'codex_core::shell_snapshot' AND feedback_log_body LIKE 'thread_spawn{%') LIMIT 1",
+                            (thread_id, f'turn.id="{turn_id}"', f' cwd={self.metadata_dir / "memories"}}}', thread_id),
+                        ).fetchone()
+                        if memory:
+                            purpose = "memory"
                 if found and found[0]:
                     purpose = found[0]
         except sqlite3.Error:
