@@ -25,8 +25,7 @@ const elements = {
 
 const translations = {
   zh: {
-    title: "Codex 模型监视器", heading: "模型调用监视器", intro: "对比每次调用所请求的模型与服务端声明的模型。",
-    noticeLabel: "判读说明", notice: "名称不同只表示请求值与服务端声明值不一致，并不能单独证明模型被降级。 服务端声明来自响应体 <code>response.model</code> 或响应头 <code>openai-model</code>。 请求模型是客户端实际发送的值；后台标题 / 摘要调用与主任务独立，用途无法确认时标为未知。",
+    title: "Codex 模型监视器", heading: "模型调用监视器",
     summaryLabel: "事件概览", total: "全部记录", equal: "一致", different: "不一致", unknown: "未知",
     healthTitle: "采集状态", waitingData: "等待数据", source: "来源", lastScan: "最后扫描", probe: "探针", error: "错误", none: "无",
     eventsTitle: "调用记录", filterPurpose: "按调用用途筛选", allPurposes: "全部用途", filterRecords: "筛选记录",
@@ -34,13 +33,13 @@ const translations = {
     time: "时间", purpose: "调用用途", requestedModel: "请求模型", serverModel: "服务端声明", status: "状态", threadTurn: "线程 / 回合", transport: "传输",
     emptyTitle: "暂无调用记录", emptyDetail: "捕获到模型调用后会显示在这里。", noMatches: "没有匹配的记录", adjustFilters: "请调整筛选条件。",
     cannotRead: "无法读取调用记录", notUpdated: "尚未更新", connecting: "正在连接", disconnected: "连接中断", retrying: "将在 2 秒后重试", live: "实时更新中", updated: "更新于 {time}",
+    quotaExhausted: "额度耗尽，未返回模型",
     healthOk: "已读取探针记录", healthWaiting: "等待探针数据", healthError: "采集异常", internalProbe: "Codex 内部探针", noneReturned: "未返回",
     responseHeader: "响应头：{model}", warmup: "预热", invalidData: "接口返回的数据格式无效", readFailed: "读取数据失败", httpError: "请求失败（HTTP {status}）",
     switchLanguage: "Switch to English", purposeMain: "主任务", purposeFork: "分支对话", purposeTitleSummary: "后台：标题 / 摘要", purposeMemory: "系统：记忆整理", purposeSuggestions: "系统：任务建议", purposeSuggestionReview: "系统：任务建议安全审核", purposeSubagent: "子代理", purposeBackground: "后台辅助", purposeWarmup: "预热", purposeUnknown: "用途未知",
   },
   en: {
-    title: "Codex Model Monitor", heading: "Model Call Monitor", intro: "Compare the model requested for each call with the model declared by the server.",
-    noticeLabel: "Interpretation note", notice: "Different names only mean that the requested value and server-declared value do not match; this alone does not prove a model downgrade. The server declaration comes from <code>response.model</code> in the response body or the <code>openai-model</code> response header. The requested model is the value actually sent by the client. Background title and summary calls are separate from the main task; calls whose purpose cannot be determined are marked unknown.",
+    title: "Codex Model Monitor", heading: "Model Call Monitor",
     summaryLabel: "Event summary", total: "All records", equal: "Match", different: "Mismatch", unknown: "Unknown",
     healthTitle: "Collector status", waitingData: "Waiting for data", source: "Source", lastScan: "Last scan", probe: "Probe", error: "Error", none: "None",
     eventsTitle: "Call records", filterPurpose: "Filter by call purpose", allPurposes: "All purposes", filterRecords: "Filter records",
@@ -48,6 +47,7 @@ const translations = {
     time: "Time", purpose: "Call purpose", requestedModel: "Requested model", serverModel: "Server declaration", status: "Status", threadTurn: "Thread / turn", transport: "Transport",
     emptyTitle: "No call records", emptyDetail: "Model calls will appear here after they are captured.", noMatches: "No matching records", adjustFilters: "Adjust the filters and try again.",
     cannotRead: "Unable to read call records", notUpdated: "Not updated yet", connecting: "Connecting", disconnected: "Connection interrupted", retrying: "Retrying in 2 seconds", live: "Updating live", updated: "Updated at {time}",
+    quotaExhausted: "Quota exhausted, no model returned",
     healthOk: "Probe records loaded", healthWaiting: "Waiting for probe data", healthError: "Collector error", internalProbe: "Codex internal probe", noneReturned: "Not returned",
     responseHeader: "Response header: {model}", warmup: "Warmup", invalidData: "The API returned invalid data", readFailed: "Unable to read data", httpError: "Request failed (HTTP {status})",
     switchLanguage: "切换到中文", purposeMain: "Main task", purposeFork: "Forked conversation", purposeTitleSummary: "Background: title / summary", purposeMemory: "System: memory", purposeSuggestions: "System: task suggestions", purposeSuggestionReview: "System: suggestion safety review", purposeSubagent: "Subagent", purposeBackground: "Background helper", purposeWarmup: "Warmup", purposeUnknown: "Unknown purpose",
@@ -77,7 +77,6 @@ function applyLanguage() {
   document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
   document.title = t("title");
   document.querySelectorAll("[data-i18n]").forEach((node) => { node.textContent = t(node.dataset.i18n); });
-  document.querySelectorAll("[data-i18n-html]").forEach((node) => { node.innerHTML = t(node.dataset.i18nHtml); });
   document.querySelectorAll("[data-i18n-aria-label]").forEach((node) => { node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel)); });
   document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => { node.placeholder = t(node.dataset.i18nPlaceholder); });
   elements.languageToggle.textContent = language === "zh" ? "English" : "中文";
@@ -160,7 +159,8 @@ function renderEvents() {
     statusCell.append(badge);
     row.append(statusCell);
 
-    appendCell(row, t("source"), event.source === "none" ? t("noneReturned") : event.source);
+    appendCell(row, t("source"), event.outcome === "quota_exhausted" ? t("quotaExhausted")
+      : event.source === "none" ? t("noneReturned") : event.source);
     appendCell(row, t("threadTurn"), [event.thread_id, event.turn_id].filter(Boolean).join(" / "), "identity-cell");
     appendCell(row, t("transport"), [event.transport, event.warmup ? t("warmup") : ""].filter(Boolean).join(" · "));
     elements.rows.append(row);

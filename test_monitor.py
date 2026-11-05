@@ -88,6 +88,7 @@ class ProbeStoreTest(unittest.TestCase):
                     database.execute("ALTER TABLE events DROP COLUMN time")
                     database.execute("ALTER TABLE events DROP COLUMN status")
                     database.execute("ALTER TABLE events DROP COLUMN purpose")
+                    database.execute("ALTER TABLE events DROP COLUMN outcome")
             ProbeStore(probe).scan()
             for day, expected in [
                 ("2026-09-14", [
@@ -100,8 +101,8 @@ class ProbeStoreTest(unittest.TestCase):
                 with closing(sqlite3.connect(store.archive_dir / f"{day}.sqlite")) as database:
                     records = database.execute("SELECT * FROM events ORDER BY rowid").fetchall()
                     columns = [column[1] for column in database.execute("PRAGMA table_info(events)")]
-                self.assertEqual(columns, ["requested_model", "response_model", "time", "status", "purpose"])
-                self.assertEqual(records, [(*row, "unknown") for row in expected])
+                self.assertEqual(columns, ["requested_model", "response_model", "time", "status", "purpose", "outcome"])
+                self.assertEqual(records, [(*row, "unknown", None) for row in expected])
 
     def test_purpose_uses_metadata_and_backfills_delayed_title_log(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -171,6 +172,21 @@ class ProbeStoreTest(unittest.TestCase):
                 db.execute("INSERT INTO logs VALUES ('worker', 'codex_core::shell_snapshot', 'thread_spawn{...}')")
                 db.commit()
                 self.assertEqual(store._purpose(event), "memory")
+
+    def test_quota_error_marks_only_last_unanswered_attempt_of_that_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe = root / "probe.jsonl"
+            probe.write_text("".join(json.dumps(dict(id=str(ts), time=ts, phase="request",
+                thread_id="thread", turn_id=turn)) + "\n" for ts, turn in
+                [(100, "turn"), (101, "turn"), (102, "other")]), encoding="utf-8")
+            with closing(sqlite3.connect(root / "logs_2.sqlite")) as db, db:
+                db.execute("CREATE TABLE logs (thread_id, target, feedback_log_body, ts, ts_nanos)")
+                db.execute("INSERT INTO logs VALUES ('thread','codex_core::session::turn',?,102,0)",
+                           ("run_turn{turn.id=turn}: Turn error: You’ve hit your usage limit.",))
+            rows = ProbeStore(probe, metadata_dir=root).snapshot()["events"]
+            self.assertEqual({e["id"]: e["outcome"] for e in rows},
+                             {"100": None, "101": "quota_exhausted", "102": None})
 
     def test_archive_write_failure_is_reported_and_retried(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

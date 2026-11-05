@@ -79,10 +79,10 @@ index 9c41a802..52d96baf 100644
      }
  }
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 27361aef..1265fa16 100644
+index f43e285d..26537853 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-@@ -10,6 +10,7 @@ use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbe;
+@@ -11,6 +11,7 @@ use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbe;
  use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeError;
  use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeFailureStage;
  use crate::error::ApiError;
@@ -90,7 +90,7 @@ index 27361aef..1265fa16 100644
  use crate::provider::Provider;
  use crate::rate_limits::parse_rate_limit_event;
  use crate::responses_headers::json_headers_to_http_headers;
-@@ -284,6 +285,13 @@ impl ResponsesWebsocketConnection {
+@@ -291,6 +292,13 @@ impl ResponsesWebsocketConnection {
              connection_reused,
          };
          let request_text = serialize_websocket_request(&request)?;
@@ -104,7 +104,7 @@ index 27361aef..1265fa16 100644
  
          let current_span = Span::current();
          tokio::spawn(
-@@ -292,7 +300,7 @@ impl ResponsesWebsocketConnection {
+@@ -299,7 +307,7 @@ impl ResponsesWebsocketConnection {
                  reason = "the guard serializes exclusive use of the websocket stream for the lifetime of the response stream"
              )]
              async move {
@@ -113,7 +113,7 @@ index 27361aef..1265fa16 100644
                      let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
                  }
                  if server_reasoning_included {
-@@ -354,6 +362,8 @@ impl ResponsesWebsocketConnection {
+@@ -361,6 +369,8 @@ impl ResponsesWebsocketConnection {
                              &timing_log_context,
                              interrupt.clone(),
                              &mut completion,
@@ -122,7 +122,7 @@ index 27361aef..1265fa16 100644
                          ) => result,
                          () = &mut interrupt_timeout => Err(ApiError::Stream(
                              "timed out draining interrupted response".into(),
-@@ -755,6 +765,8 @@ async fn run_websocket_response_stream(
+@@ -763,6 +773,8 @@ async fn run_websocket_response_stream(
      timing_log_context: &ResponsesWebsocketTimingLogContext,
      interrupt: impl Future<Output = ResponseInterrupt> + Clone + Unpin,
      completion: &mut Option<ResponseEvent>,
@@ -131,7 +131,7 @@ index 27361aef..1265fa16 100644
  ) -> Result<(), ApiError> {
      let mut last_server_model: Option<String> = None;
      let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
-@@ -774,6 +786,9 @@ async fn run_websocket_response_stream(
+@@ -782,6 +794,9 @@ async fn run_websocket_response_stream(
      )
      .await?;
  
@@ -141,7 +141,7 @@ index 27361aef..1265fa16 100644
      // A response owns its interrupt, and create must be sent before interrupt.
      let mut interrupt_request = interrupt.clone().fuse();
      let mut interruption = None;
-@@ -870,6 +885,9 @@ async fn run_websocket_response_stream(
+@@ -878,6 +893,9 @@ async fn run_websocket_response_stream(
                      text.as_str(),
                      timing_log_context,
                  );
@@ -152,12 +152,12 @@ index 27361aef..1265fa16 100644
                      && let Some(etag) =
                          event
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index ad1a361a..11ce7153 100644
+index 88d55687..f06cf62f 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
-@@ -5,6 +5,7 @@ pub(crate) mod endpoint;
- pub(crate) mod error;
+@@ -6,6 +6,7 @@ pub(crate) mod error;
  pub(crate) mod files;
+ mod guardian_assessment;
  pub(crate) mod images;
 +pub(crate) mod model_probe;
  pub(crate) mod provider;
@@ -296,18 +296,18 @@ index 00000000..41f43b84
 +    assert!(!text.contains("PRIVATE"));
 +}
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
-index 7f076a13..4ecb59d2 100644
+index 67f627e6..97c0ad91 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
-@@ -5,6 +5,7 @@ use crate::common::SafetyBuffering;
- use crate::common::SafetyBufferingTreatment;
+@@ -6,6 +6,7 @@ use crate::common::SafetyBufferingTreatment;
  use crate::error::ApiError;
  use crate::error::parse_terminal_provider_error;
+ use crate::guardian_assessment::parse_guardian_assessment;
 +use crate::model_probe::ModelProbe;
  use crate::rate_limits::parse_all_rate_limits;
  use crate::safety_buffering::treatment_from_headers;
  use crate::telemetry::SseTelemetry;
-@@ -40,6 +41,7 @@ pub fn spawn_response_stream(
+@@ -41,6 +42,7 @@ pub fn spawn_response_stream(
      idle_timeout: Duration,
      telemetry: Option<Arc<dyn SseTelemetry>>,
      turn_state: Option<Arc<OnceLock<String>>>,
@@ -315,7 +315,7 @@ index 7f076a13..4ecb59d2 100644
  ) -> ResponseStream {
      let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
      let models_etag = stream_response
-@@ -52,6 +54,9 @@ pub fn spawn_response_stream(
+@@ -53,6 +55,9 @@ pub fn spawn_response_stream(
          .get(OPENAI_MODEL_HEADER)
          .and_then(|v| v.to_str().ok())
          .map(ToString::to_string);
@@ -325,7 +325,7 @@ index 7f076a13..4ecb59d2 100644
      let reasoning_included = stream_response
          .headers
          .get(X_REASONING_INCLUDED_HEADER)
-@@ -93,6 +98,7 @@ pub fn spawn_response_stream(
+@@ -94,6 +99,7 @@ pub fn spawn_response_stream(
              idle_timeout,
              telemetry,
              safety_buffering_treatment,
@@ -333,16 +333,16 @@ index 7f076a13..4ecb59d2 100644
          )
          .await;
      });
-@@ -162,7 +168,7 @@ pub struct ResponsesStreamEvent {
+@@ -164,7 +170,7 @@ pub struct ResponsesStreamEvent {
      pub(crate) kind: String,
      pub(crate) headers: Option<Value>,
      metadata: Option<Value>,
 -    response: Option<Value>,
 +    pub(crate) response: Option<Value>,
+     response_id: Option<Value>,
      error: Option<Value>,
      item: Option<Value>,
-     item_id: Option<String>,
-@@ -536,6 +542,7 @@ pub async fn process_sse(
+@@ -566,6 +572,7 @@ pub async fn process_sse(
          idle_timeout,
          telemetry,
          SafetyBufferingTreatment::default(),
@@ -350,7 +350,7 @@ index 7f076a13..4ecb59d2 100644
      )
      .await;
  }
-@@ -546,6 +553,7 @@ async fn process_sse_with_treatment(
+@@ -576,6 +583,7 @@ async fn process_sse_with_treatment(
      idle_timeout: Duration,
      telemetry: Option<Arc<dyn SseTelemetry>>,
      safety_buffering_treatment: SafetyBufferingTreatment,
@@ -358,7 +358,7 @@ index 7f076a13..4ecb59d2 100644
  ) {
      let mut stream = stream.eventsource();
      let mut response_error: Option<ApiError> = None;
-@@ -604,11 +612,15 @@ async fn process_sse_with_treatment(
+@@ -634,10 +642,14 @@ async fn process_sse_with_treatment(
                  continue;
              }
          };
@@ -366,16 +366,15 @@ index 7f076a13..4ecb59d2 100644
 +        if let Some(probe) = probe.as_mut() {
 +            probe.response(event.response.as_ref(), response_model.as_deref());
 +        }
-         let model_verifications = event.model_verifications();
-         let turn_moderation_metadata = event.turn_moderation_metadata();
          let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
+         let metadata_events = event.metadata_events(safety_buffering);
  
 -        if let Some(model) = event.response_model()
 +        if let Some(model) = response_model
              && last_server_model.as_deref() != Some(model.as_str())
          {
              if tx_event
-@@ -1549,6 +1561,7 @@ mod tests {
+@@ -1559,6 +1571,7 @@ mod tests {
              idle_timeout(),
              /*telemetry*/ None,
              /*turn_state*/ None,
@@ -383,7 +382,7 @@ index 7f076a13..4ecb59d2 100644
          );
          assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
          let event = stream
-@@ -1589,6 +1602,7 @@ mod tests {
+@@ -1599,6 +1612,7 @@ mod tests {
              idle_timeout(),
              /*telemetry*/ None,
              /*turn_state*/ None,

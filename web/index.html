@@ -9,14 +9,17 @@
     <link rel="stylesheet" href="/style.css" />
     <link rel="icon" type="image/png" href="/logo.png" />
     <script src="/app.js" defer></script>
+    <script src="/blueprint.js" defer></script>
+    <script src="/glass.js" defer></script>
   </head>
   <body>
+    <canvas id="cloudField" aria-hidden="true"></canvas>
     <main class="shell">
       <header class="masthead">
+        <canvas id="blueprint" aria-hidden="true"></canvas>
         <div>
           <p class="eyebrow">CODEX MODEL MONITOR</p>
           <h1 data-i18n="heading">模型调用监视器</h1>
-          <p class="intro" data-i18n="intro">对比每次调用所请求的模型与服务端声明的模型。</p>
         </div>
         <div class="masthead-actions">
           <button class="language-toggle" id="languageToggle" type="button">English</button>
@@ -27,15 +30,7 @@
         </div>
       </header>
 
-      <section class="notice" aria-label="判读说明" data-i18n-aria-label="noticeLabel">
-        <span class="notice-mark" aria-hidden="true">i</span>
-        <p data-i18n-html="notice">
-          名称不同只表示请求值与服务端声明值不一致，并不能单独证明模型被降级。
-          服务端声明来自响应体 <code>response.model</code> 或响应头 <code>openai-model</code>。
-          请求模型是客户端实际发送的值；后台标题 / 摘要调用与主任务独立，用途无法确认时标为未知。
-        </p>
-      </section>
-
+      <div class="bento">
       <section class="summary" aria-label="事件概览" data-i18n-aria-label="summaryLabel">
         <article class="metric metric-total">
           <span data-i18n="total">全部记录</span>
@@ -70,6 +65,8 @@
           <div class="health-error"><dt data-i18n="error">错误</dt><dd id="healthError">无</dd></div>
         </dl>
       </section>
+
+      </div>
 
       <section class="panel events-panel" aria-labelledby="eventsTitle">
         <div class="events-heading">

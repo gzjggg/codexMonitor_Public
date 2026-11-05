@@ -17,6 +17,23 @@ function Test-PathInside([string]$Path, [string]$Directory) {
     $candidate.StartsWith($parent, [StringComparison]::OrdinalIgnoreCase)
 }
 
+function New-CargoConfigDirectory([string]$OutputRoot) {
+    $originalConfigRoot = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $env:USERPROFILE '.config' }
+    $originalGitConfig = Join-Path $originalConfigRoot 'git\config'
+    $configRoot = Join-Path $OutputRoot 'cargo-config'
+    $gitDirectory = Join-Path $configRoot 'git'
+    New-Item -ItemType Directory -Force -Path $gitDirectory | Out-Null
+    $gitConfig = Join-Path $gitDirectory 'config'
+    Set-Content -LiteralPath $gitConfig -Value '' -Encoding utf8
+    if (Test-Path -LiteralPath $originalGitConfig) {
+        & git config --file $gitConfig --add include.path $originalGitConfig
+        if ($LASTEXITCODE -ne 0) { throw 'Could not preserve the XDG Git configuration for Cargo.' }
+    }
+    & git config --file $gitConfig core.longpaths true
+    if ($LASTEXITCODE -ne 0) { throw 'Could not enable long paths for Cargo dependency checkouts.' }
+    return $configRoot
+}
+
 function Remove-GeneratedDirectory([string]$Path, [string]$Parent) {
     if (-not (Test-PathInside $Path $Parent)) { throw "Refusing to remove a directory outside $Parent`: $Path" }
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
@@ -181,11 +198,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Compiling probe backend $version-monitor..."
 $savedEnvironment = @{}
-foreach ($name in @('CODEX_REPO_ROOT', 'CARGO_TARGET_DIR', 'RUSTY_V8_ARCHIVE', 'RUSTY_V8_SRC_BINDING_PATH')) {
+foreach ($name in @('CODEX_REPO_ROOT', 'CARGO_TARGET_DIR', 'RUSTY_V8_ARCHIVE', 'RUSTY_V8_SRC_BINDING_PATH', 'XDG_CONFIG_HOME')) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 Push-Location (Join-Path $source 'codex-rs')
 try {
+    # Cargo's libgit2 checkout ignores GIT_CONFIG_GLOBAL; use its XDG config search path.
+    $env:XDG_CONFIG_HOME = New-CargoConfigDirectory (Join-Path $PSScriptRoot 'output')
     $env:CODEX_REPO_ROOT = $source
     $env:CARGO_TARGET_DIR = Join-Path $PSScriptRoot 'output\target'
     $v8Environment = & python -c 'import sys,json; sys.path.insert(0,"../scripts"); from codex_package.v8 import resolve_codex_v8_cargo_env; from codex_package.targets import TARGET_SPECS; print(json.dumps(resolve_codex_v8_cargo_env(TARGET_SPECS["x86_64-pc-windows-msvc"])))'
@@ -211,7 +230,10 @@ try {
 }
 finally {
     Pop-Location
-    foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
+    foreach ($name in $savedEnvironment.Keys) {
+        $value = if ($null -eq $savedEnvironment[$name]) { [NullString]::Value } else { $savedEnvironment[$name] }
+        [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
 }
 Remove-OldProbeCaches $probeRoot $cacheDirectory
 Remove-OldGeneratedFiles $repository (Join-Path $PSScriptRoot 'output\src') (Join-Path $PSScriptRoot 'output\desktop') $desktopDirectory

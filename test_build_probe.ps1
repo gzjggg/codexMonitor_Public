@@ -15,6 +15,21 @@ if (-not $mismatchRejected) { throw 'A mismatched backend version was accepted.'
 
 $cacheTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-cache-check-" + [guid]::NewGuid())
 try {
+    $savedXdgConfig = $env:XDG_CONFIG_HOME
+    try {
+        $env:XDG_CONFIG_HOME = Join-Path $cacheTestRoot 'user-config'
+        New-Item -ItemType Directory -Path (Join-Path $env:XDG_CONFIG_HOME 'git') -Force | Out-Null
+        $originalConfig = Join-Path $env:XDG_CONFIG_HOME 'git\config'
+        "[core]`nlongpaths = false`n[probe-test]`nmarker = preserved" | Set-Content -LiteralPath $originalConfig
+        $originalHash = (Get-FileHash -LiteralPath $originalConfig).Hash
+        $cargoConfig = Join-Path (New-CargoConfigDirectory (Join-Path $cacheTestRoot 'output')) 'git\config'
+        if ((& git config --file $cargoConfig --includes --get core.longpaths) -ne 'true' -or
+            (& git config --file $cargoConfig --includes --get probe-test.marker) -ne 'preserved' -or
+            (Get-FileHash -LiteralPath $originalConfig).Hash -ne $originalHash) {
+            throw 'Cargo must enable long paths while preserving the original XDG Git configuration.'
+        }
+    }
+    finally { $env:XDG_CONFIG_HOME = $savedXdgConfig }
     $keep = Join-Path $cacheTestRoot 'new\patch'
     New-Item -ItemType Directory -Force -Path $keep, (Join-Path $cacheTestRoot 'old\patch') | Out-Null
     Remove-OldProbeCaches $cacheTestRoot $keep

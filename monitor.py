@@ -7,12 +7,14 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
 import threading
 import webbrowser
 from collections import OrderedDict
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -27,6 +29,8 @@ STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/blueprint.js": ("blueprint.js", "text/javascript; charset=utf-8"),
+    "/glass.js": ("glass.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/logo.png": ("logo.png", "image/png"),
 }
@@ -38,6 +42,29 @@ STRING_FIELDS = (
     "server_model",
     "transport",
 )
+
+
+@lru_cache(maxsize=16)
+def _suggestion_threads(path: Path, modified_ns: int) -> set[str]:
+    """Match a completed Desktop suggestion window to its sole untracked turn."""
+    turns = []
+    result = set()
+    with path.open(encoding="utf-8", errors="replace") as logfile:
+        for line in logfile:
+            if "Received turn/started for unknown conversation conversationId=" in line:
+                match = re.search(r"conversationId=([\da-f-]{36})\b", line)
+                if match:
+                    turns.append((line[:24], match[1]))
+            elif "[ambient-suggestions] ambient_suggestion_generation" in line and "status=succeeded" in line:
+                latency = re.search(r"\blatencyMs=(\d+)\b", line)
+                if not latency or not _iso_time(line[:24]):
+                    continue
+                end = datetime.fromisoformat(line[:24])
+                start = (end - timedelta(milliseconds=int(latency[1]))).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                candidates = {tid for ts, tid in turns if start <= ts <= line[:24]}
+                if len(candidates) == 1:
+                    result.update(candidates)
+    return result
 
 
 def _iso_time(value: object) -> str | None:
@@ -137,6 +164,8 @@ class ProbeStore:
         self._valid = False
         self._lock = threading.Lock()
         self._purposes = OrderedDict()
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        self.desktop_logs = local / "Packages/OpenAI.Codex_2p2nqsd0c76g0/LocalCache/Local/Codex/Logs"
         self._health: dict[str, object] = {
             "source": "probe",
             "status": "waiting",
@@ -220,9 +249,24 @@ class ProbeStore:
                         ).fetchone()
                         if memory:
                             purpose = "memory"
+                        elif event.get("time") and self.desktop_logs.is_dir():
+                            started = database.execute(
+                                "SELECT ts FROM logs WHERE thread_id=? AND target='codex_core::shell_snapshot' "
+                                "AND instr(feedback_log_body, 'rpc.method=\"thread/start\"')>0 "
+                                "AND instr(feedback_log_body, 'app_server.client_name=\"Codex Desktop\"')>0 LIMIT 1",
+                                (thread_id,),
+                            ).fetchone()
+                            if started:
+                                utc = datetime.fromtimestamp(started[0], timezone.utc)
+                                for date in {utc.date(), utc.astimezone().date()}:
+                                    directory = self.desktop_logs / date.strftime("%Y/%m/%d")
+                                    if any(thread_id in _suggestion_threads(path, path.stat().st_mtime_ns)
+                                           for path in directory.glob("codex-desktop-*.log")):
+                                        purpose = "suggestions"
+                                        break
                 if found and found[0]:
                     purpose = found[0]
-        except sqlite3.Error:
+        except (sqlite3.Error, OSError):
             # Missing/locked source metadata must not prevent model-call archiving.
             return "unknown"
         if purpose != "unknown":
@@ -297,14 +341,14 @@ class ProbeStore:
                         database.execute("DELETE FROM calls WHERE day = ?", (day,))
                     database.execute("CREATE TABLE IF NOT EXISTS daily.events (requested_model TEXT, response_model TEXT)")
                     columns = [column[1] for column in database.execute("PRAGMA daily.table_info(events)")]
-                    for column in ("time", "status", "purpose"):
+                    for column in ("time", "status", "purpose", "outcome"):
                         if column not in columns:
                             database.execute(f"ALTER TABLE daily.events ADD COLUMN {column} TEXT")
                     for event in rows:
                         purpose = event.get("purpose") or self._purpose(event)
                         timestamp = datetime.fromisoformat(event["time"]).astimezone(ARCHIVE_TIMEZONE).isoformat(timespec="milliseconds")
                         match = database.execute(
-                            "SELECT calls.row_id, response_seen, events.purpose FROM calls "
+                            "SELECT calls.row_id, response_seen, events.purpose, events.outcome FROM calls "
                             "JOIN daily.events ON events.rowid = calls.row_id WHERE day = ? AND call_id = ?",
                             (day, event["id"]),
                         ).fetchone()
@@ -314,6 +358,10 @@ class ProbeStore:
                                 purpose = match[2]
                             if event["id"] in self._events:
                                 self._events[event["id"]]["purpose"] = purpose
+                                if event.get("response_model") or event.get("server_model"):
+                                    self._events[event["id"]].pop("outcome", None)
+                                elif match[3]:
+                                    self._events[event["id"]]["outcome"] = match[3]
                             if match[1] and not event.get("response_model"):
                                 models = (models[0], None)
                             database.execute(
@@ -323,6 +371,11 @@ class ProbeStore:
                                 "purpose = COALESCE(NULLIF(?, 'unknown'), purpose, 'unknown') WHERE rowid = ?",
                                 (*models, timestamp, timestamp, purpose, match[0]),
                             )
+                            if match[3] and (models[1] or event.get("response_model")):
+                                database.execute("UPDATE daily.events SET outcome=NULL WHERE rowid=?", (match[0],))
+                            elif event.get("outcome"):
+                                database.execute("UPDATE daily.events SET outcome=? WHERE rowid=?",
+                                                 (event["outcome"], match[0]))
                             if event.get("response_model"):
                                 database.execute("UPDATE calls SET response_seen = 1 WHERE day = ? AND call_id = ?", (day, event["id"]))
                         else:
@@ -379,6 +432,36 @@ class ProbeStore:
             self._marker = b""
             self._needs_compact = False
 
+    def _quota_interruptions(self):
+        logs = self.metadata_dir / "logs_2.sqlite"
+        if not logs.exists():
+            return
+        latest = {}
+        for event in self._events.values():
+            key = event.get("thread_id"), event.get("turn_id")
+            if all(key) and (key not in latest or event["time"] >= latest[key]["time"]):
+                latest[key] = event
+        try:
+            with closing(sqlite3.connect(logs.as_uri() + "?mode=ro", uri=True)) as db:
+                for (thread, turn), event in latest.items():
+                    if (event.get("warmup") or event.get("response_model") or event.get("server_model")
+                            or event.get("outcome") or event["phase"] != "request"):
+                        continue
+                    sent = datetime.fromisoformat(event["time"]).timestamp()
+                    found = db.execute(
+                        "SELECT 1 FROM logs WHERE thread_id=? AND target='codex_core::session::turn' "
+                        "AND ts BETWEEN ? AND ? AND ts + ts_nanos / 1e9 >= ? "
+                        "AND instr(feedback_log_body, ?) > 0 "
+                        "AND replace(feedback_log_body, '’', char(39)) LIKE ? LIMIT 1",
+                        (thread, int(sent), int(sent) + 60, sent, f'turn.id={turn}}}',
+                         "%}: Turn error: You've hit your usage limit.%"),
+                    ).fetchone()
+                    if found:
+                        event["outcome"] = "quota_exhausted"
+                        yield event
+        except sqlite3.Error:
+            return
+
     def scan(self) -> None:
         scanned_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
@@ -424,6 +507,9 @@ class ProbeStore:
                     self._marker = probe.read(marker_length)
                 # Local metadata can arrive after the probe line; retry recent unknown calls.
                 resolved = {}
+                for event in self._quota_interruptions():
+                    day = datetime.fromisoformat(event["time"]).astimezone(ARCHIVE_TIMEZONE).date().isoformat()
+                    resolved.setdefault(day, []).append(event)
                 for event in self._events.values():
                     if event.get("purpose") == "unknown":
                         purpose = self._purpose(event)
@@ -466,6 +552,7 @@ class ProbeStore:
                     "transport": stored.get("transport"),
                     "warmup": stored.get("warmup", False),
                     "purpose": stored.get("purpose", "unknown"),
+                    "outcome": stored.get("outcome"),
                 }
                 observed = event["response_model"] or event["server_model"]
                 requested = event["requested_model"]
